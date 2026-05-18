@@ -21,6 +21,7 @@ HOST MACHINE
                      ├── 5g-sim-ausf          10.100.0.23
                      ├── 5g-sim-nssf          10.100.0.24
                      ├── 5g-sim-pcf           10.100.0.25
+                     ├── 5g-sim-chf           10.100.0.26
                      ├── 5g-sim-amf           10.100.0.30
                      ├── 5g-sim-smf-embb      10.100.0.31
                      ├── 5g-sim-smf-mtc       10.100.0.32
@@ -58,7 +59,7 @@ HOST MACHINE
 Run this on the host once to create all directories and install the gtp5g kernel module:
 
 ```bash
-mkdir -p /home/rifqi/thesis-rifqi/5gproj/config/free5gc/{amf,smf-embb,smf-mtc,upf-embb,upf-mtc,nssf,nrf,ausf,udr,udm,pcf,webui}
+mkdir -p /home/rifqi/thesis-rifqi/5gproj/config/free5gc/{amf,smf-embb,smf-mtc,upf-embb,upf-mtc,nssf,nrf,ausf,udr,udm,pcf,chf,webui}
 mkdir -p /home/rifqi/thesis-rifqi/5gproj/config/ueransim/{gnb,ue-video,ue-iot}
 mkdir -p /home/rifqi/thesis-rifqi/5gproj/mongo-init
 mkdir -p /home/rifqi/thesis-rifqi/5gproj/ns3-sim/scratch
@@ -160,6 +161,7 @@ for img in \
   free5gc/ausf:v3.4.1 \
   free5gc/nssf:v3.4.1 \
   free5gc/pcf:v3.4.1 \
+  free5gc/chf:v3.4.1 \
   free5gc/amf:v3.4.1 \
   free5gc/smf:v3.4.1 \
   free5gc/upf:v3.4.1 \
@@ -509,6 +511,7 @@ configuration:
   timeFormat: 2019-01-02 15:04:05
   defaultBdtRefId: BdtPolicyId-
   nrfUri: http://10.100.0.20:8000
+  locality: area1
   serviceList:
     - serviceName: npcf-am-policy-control
     - serviceName: npcf-smpolicycontrol
@@ -540,6 +543,130 @@ docker exec 5g-sim-host \
     /free5gc/pcf -c /free5gc/config/pcfcfg.yaml
 
 sleep 8
+```
+
+---
+
+## Step 11.5 — CHF
+
+SMF v3.4.1 unconditionally calls CHF (`nchf-convergedcharging`) during every PDU
+session create. Without a real CHF registered in NRF, SMF crashes with a nil pointer
+in `SendConvergedChargingRequest` and no PDU session can ever be established.
+
+If you inserted a stub CHF NfProfile into MongoDB during troubleshooting, remove it
+first so the real CHF registration is clean:
+
+```bash
+docker exec 5g-sim-host docker exec 5g-sim-mongodb \
+  mongo free5gc --quiet --eval \
+  'db.NfProfile.deleteMany({ nfType: "CHF" }); print("stub CHF profiles removed")'
+```
+
+Write the CHF config and start the container:
+
+```bash
+cat > /home/rifqi/thesis-rifqi/5gproj/config/free5gc/chf/chfcfg.yaml << 'EOF'
+info:
+  version: 1.0.3
+  description: CHF configuration
+
+configuration:
+  chfName: CHF
+  sbi:
+    scheme: http
+    registerIPv4: 10.100.0.26
+    bindingIPv4: 0.0.0.0
+    port: 8000
+  nrfUri: http://10.100.0.20:8000
+  locality: area1
+  serviceNameList:
+    - nchf-convergedcharging
+  mongodb:
+    name: free5gc
+    url: mongodb://10.100.0.10:27017
+    quotaValidityTime: 10000
+    volumeLimit: 50000
+    volumeLimitPDU: 10000
+    volumeThresholdRate: 0.8
+  cgf:
+    hostIPv4: 10.100.0.50
+    port: 2122
+    listenPort: 2121
+    tls:
+      pem: cert/chf.pem
+      key: cert/chf.key
+    cdrFilePath: /tmp
+  abmfDiameter:
+    protocol: tcp
+    hostIPv4: 10.100.0.26
+    port: 3868
+    tls:
+      pem: cert/chf.pem
+      key: cert/chf.key
+  rfDiameter:
+    protocol: tcp
+    hostIPv4: 10.100.0.26
+    port: 3869
+    tls:
+      pem: cert/chf.pem
+      key: cert/chf.key
+
+logger:
+  enable: true
+  level: info
+  reportCaller: false
+EOF
+
+docker exec 5g-sim-host \
+  docker run -d \
+    --name        5g-sim-chf \
+    --network     5g-sim-net \
+    --ip          10.100.0.26 \
+    --memory=256m --cpus=0.25 \
+    --restart     unless-stopped \
+    -v /sim/config/free5gc/chf:/free5gc/config:ro \
+    free5gc/chf:v3.4.1 \
+    /free5gc/chf -c /free5gc/config/chfcfg.yaml
+
+sleep 8
+
+docker exec 5g-sim-host docker logs 5g-sim-chf 2>&1 | grep -i "register\|start\|error" | head -10
+```
+
+Expected: `OAuth2 setting receive from NRF: false` and no errors.
+
+CHF v3.4.1's config struct does not have a `locality` field, so it registers in NRF without one.
+SMF's NRF discovery query uses `preferred-locality=area1` (strict filter) and will return zero
+results — `CHFSelection` fails silently and `SelectedCHFProfile` stays nil, causing a nil-pointer
+crash in the cleanup path. Patch the NfProfile in MongoDB immediately after CHF registers:
+
+```bash
+docker exec 5g-sim-host docker exec 5g-sim-mongodb mongo free5gc --quiet --eval '
+  var r = db.NfProfile.updateOne(
+    { nfType: "CHF" },
+    { $set: { locality: "area1" } }
+  );
+  print("matched:", r.matchedCount, "modified:", r.modifiedCount);
+'
+```
+
+Expected: `matched: 1 modified: 1`. This patch must be re-applied after every CHF container
+restart because CHF overwrites its NfProfile on each re-registration.
+
+Verify CHF now has locality in NRF:
+
+```bash
+docker exec 5g-sim-host docker exec 5g-sim-mongodb mongo free5gc --quiet --eval \
+  'printjson(db.NfProfile.findOne({nfType:"CHF"}, {locality:1, nfStatus:1, ipv4Addresses:1}))'
+```
+
+Expected: `"locality": "area1"` present.
+
+Now restart SMF containers so they re-discover CHF via NRF:
+
+```bash
+docker exec 5g-sim-host docker restart 5g-sim-smf-embb 5g-sim-smf-mtc
+sleep 5
 ```
 
 ---
@@ -1076,6 +1203,109 @@ docker exec 5g-sim-host docker logs 5g-sim-gnb 2>&1 | grep -i "ng setup\|connect
 
 ---
 
+## Step 20.5 — Provision Subscribers
+
+Write the JS to the already-mounted `mongo-init` directory, then execute it directly inside the MongoDB container.
+
+Two known pitfalls fixed here vs the naive approach:
+- `gpsis` must be present in amData — AMF crashes on `data.Gpsis[0]` if absent
+- SMF selection data must go into `smfSelectionSubscriptionData` — not `smfSelData`
+
+```bash
+cat > /home/rifqi/thesis-rifqi/5gproj/mongo-init/provision.js << 'EOF'
+db = db.getSiblingDB('free5gc');
+
+function provision(imsi, sst, sd, dnn, sstSdKey) {
+  var ueId = "imsi-" + imsi;
+  var plmn = "99970";
+  var f    = { ueId: ueId, servingPlmnId: plmn };
+
+  db["subscriptionData.authenticationData.authenticationSubscription"].updateOne(f, { $set: {
+    ueId: ueId, servingPlmnId: plmn,
+    authenticationMethod: "5G_AKA",
+    authenticationManagementField: "8000",
+    permanentKey: { permanentKeyValue: "465B5CE8B199B49FAA5F0A2EE238A6BC", encryptionKey: 0, encryptionAlgorithm: 0 },
+    opc:          { opcValue: "E8ED289DEBA952E4283B54E88E6183CA",  encryptionKey: 0, encryptionAlgorithm: 0 },
+    milenage:     { op: { opValue: "", encryptionKey: 0, encryptionAlgorithm: 0 } },
+    sequenceNumber: "16f3b3f70fc2"
+  }}, { upsert: true });
+
+  db["subscriptionData.provisionedData.amData"].updateOne(f, { $set: {
+    ueId: ueId, servingPlmnId: plmn,
+    gpsis: ["msisdn-09" + imsi.slice(-8)],
+    nssai: { defaultSingleNssais: [{ sst: sst, sd: sd }], singleNssais: [{ sst: sst, sd: sd }] },
+    subscribedUeAmbr: { uplink: "1 Gbps", downlink: "2 Gbps" }
+  }}, { upsert: true });
+
+  var dnnCfg = {};
+  dnnCfg[dnn] = {
+    pduSessionTypes: { defaultSessionType: "IPV4", allowedSessionTypes: ["IPV4"] },
+    sscModes:        { defaultSscMode: "SSC_MODE_1", allowedSscModes: ["SSC_MODE_2","SSC_MODE_3"] },
+    sessionAmbr:     { uplink: "200 Mbps", downlink: "100 Mbps" },
+    "5gQosProfile":  { "5qi": 9, arp: { priorityLevel: 8, preemptCap: "NOT_PREEMPT", preemptVuln: "NOT_PREEMPTABLE" }, priorityLevel: 8 }
+  };
+  db["subscriptionData.provisionedData.smData"].updateOne(
+    { ueId: ueId, servingPlmnId: plmn, singleNssai: { sst: sst, sd: sd } },
+    { $set: { ueId: ueId, servingPlmnId: plmn, singleNssai: { sst: sst, sd: sd }, dnnConfigurations: dnnCfg } },
+    { upsert: true }
+  );
+
+  var snssaiInfos = {};
+  snssaiInfos[sstSdKey] = { dnnInfos: [{ dnn: dnn }] };
+  db["subscriptionData.provisionedData.smfSelectionSubscriptionData"].updateOne(f, { $set: {
+    ueId: ueId, servingPlmnId: plmn, subscribedSnssaiInfos: snssaiInfos
+  }}, { upsert: true });
+
+  db["policyData.ues.amData"].updateOne({ ueId: ueId }, { $set: {
+    ueId: ueId, subscCats: ["free5gc"]
+  }}, { upsert: true });
+
+  var smPolicyData = {};
+  smPolicyData[sstSdKey] = { snssai: { sst: sst, sd: sd }, smPolicyDnnData: {} };
+  smPolicyData[sstSdKey].smPolicyDnnData[dnn] = { dnn: dnn };
+  db["policyData.ues.smData"].updateOne({ ueId: ueId }, { $set: {
+    ueId: ueId, smPolicySnssaiData: smPolicyData
+  }}, { upsert: true });
+
+  print("Provisioned: " + ueId);
+}
+
+provision("999700000000001", 1, "000001", "video", "01000001");
+provision("999700000000002", 1, "000001", "video", "01000001");
+provision("999700000000101", 3, "000002", "iot",   "03000002");
+provision("999700000000102", 3, "000002", "iot",   "03000002");
+provision("999700000000103", 3, "000002", "iot",   "03000002");
+print("Done.");
+EOF
+
+docker exec 5g-sim-host docker exec 5g-sim-mongodb \
+  mongo --quiet /docker-entrypoint-initdb.d/provision.js
+```
+
+Should print `Provisioned: imsi-...` × 5 then `Done.` Verify all six collections are populated:
+
+```bash
+docker exec 5g-sim-host docker exec 5g-sim-mongodb mongo free5gc --quiet --eval '
+  print("authSub:    ", db["subscriptionData.authenticationData.authenticationSubscription"].count());
+  print("amData:     ", db["subscriptionData.provisionedData.amData"].count());
+  print("smData:     ", db["subscriptionData.provisionedData.smData"].count());
+  print("smfSelSub:  ", db["subscriptionData.provisionedData.smfSelectionSubscriptionData"].count());
+  print("policyAm:   ", db["policyData.ues.amData"].count());
+  print("policySm:   ", db["policyData.ues.smData"].count());
+'
+```
+
+Expected: all six lines show `5`.
+
+Restart AMF to clear stale UE context, then restart gNB and UE containers:
+
+```bash
+docker exec 5g-sim-host docker restart 5g-sim-amf && sleep 5 && docker exec 5g-sim-host docker restart 5g-sim-gnb && sleep 3
+docker exec 5g-sim-host docker restart 5g-sim-ue-video-1 5g-sim-ue-video-2 5g-sim-ue-iot-1 5g-sim-ue-iot-2 5g-sim-ue-iot-3
+```
+
+---
+
 ## Step 21 — UE Video 1
 
 ```bash
@@ -1116,6 +1346,16 @@ ciphering:
 integrityMaxRate:
   uplink: 'full'
   downlink: 'full'
+uacAic:
+  mps: false
+  mcs: false
+uacAcc:
+  normalClass: 0
+  class11: false
+  class12: false
+  class13: false
+  class14: false
+  class15: false
 EOF
 
 docker exec 5g-sim-host \
@@ -1126,6 +1366,7 @@ docker exec 5g-sim-host \
     --memory=256m --cpus=0.25 \
     --restart     unless-stopped \
     --cap-add     NET_ADMIN \
+    --device      /dev/net/tun \
     -v /sim/config/ueransim/ue-video:/etc/ueransim:ro \
     towards5gs/ueransim-ue \
     /ueransim/build/nr-ue -c /etc/ueransim/ue-video-1.yaml
@@ -1150,6 +1391,7 @@ docker exec 5g-sim-host \
     --memory=256m --cpus=0.25 \
     --restart     unless-stopped \
     --cap-add     NET_ADMIN \
+    --device      /dev/net/tun \
     -v /sim/config/ueransim/ue-video:/etc/ueransim:ro \
     towards5gs/ueransim-ue \
     /ueransim/build/nr-ue -c /etc/ueransim/ue-video-2.yaml
@@ -1199,6 +1441,16 @@ ciphering:
 integrityMaxRate:
   uplink: 'full'
   downlink: 'full'
+uacAic:
+  mps: false
+  mcs: false
+uacAcc:
+  normalClass: 0
+  class11: false
+  class12: false
+  class13: false
+  class14: false
+  class15: false
 EOF
 
 docker exec 5g-sim-host \
@@ -1209,6 +1461,7 @@ docker exec 5g-sim-host \
     --memory=128m --cpus=0.1 \
     --restart     unless-stopped \
     --cap-add     NET_ADMIN \
+    --device      /dev/net/tun \
     -v /sim/config/ueransim/ue-iot:/etc/ueransim:ro \
     towards5gs/ueransim-ue \
     /ueransim/build/nr-ue -c /etc/ueransim/ue-iot-1.yaml
@@ -1233,6 +1486,7 @@ docker exec 5g-sim-host \
     --memory=128m --cpus=0.1 \
     --restart     unless-stopped \
     --cap-add     NET_ADMIN \
+    --device      /dev/net/tun \
     -v /sim/config/ueransim/ue-iot:/etc/ueransim:ro \
     towards5gs/ueransim-ue \
     /ueransim/build/nr-ue -c /etc/ueransim/ue-iot-2.yaml
@@ -1257,6 +1511,7 @@ docker exec 5g-sim-host \
     --memory=128m --cpus=0.1 \
     --restart     unless-stopped \
     --cap-add     NET_ADMIN \
+    --device      /dev/net/tun \
     -v /sim/config/ueransim/ue-iot:/etc/ueransim:ro \
     towards5gs/ueransim-ue \
     /ueransim/build/nr-ue -c /etc/ueransim/ue-iot-3.yaml
@@ -1281,6 +1536,7 @@ docker exec 5g-sim-host \
     --memory=128m --cpus=0.1 \
     --restart     unless-stopped \
     --cap-add     NET_ADMIN \
+    --device      /dev/net/tun \
     -v /sim/config/ueransim/ue-iot:/etc/ueransim:ro \
     towards5gs/ueransim-ue \
     /ueransim/build/nr-ue -c /etc/ueransim/ue-iot-4.yaml
@@ -1305,6 +1561,7 @@ docker exec 5g-sim-host \
     --memory=128m --cpus=0.1 \
     --restart     unless-stopped \
     --cap-add     NET_ADMIN \
+    --device      /dev/net/tun \
     -v /sim/config/ueransim/ue-iot:/etc/ueransim:ro \
     towards5gs/ueransim-ue \
     /ueransim/build/nr-ue -c /etc/ueransim/ue-iot-5.yaml
@@ -1329,6 +1586,7 @@ docker exec 5g-sim-host \
     --memory=128m --cpus=0.1 \
     --restart     unless-stopped \
     --cap-add     NET_ADMIN \
+    --device      /dev/net/tun \
     -v /sim/config/ueransim/ue-iot:/etc/ueransim:ro \
     towards5gs/ueransim-ue \
     /ueransim/build/nr-ue -c /etc/ueransim/ue-iot-6.yaml
@@ -1353,6 +1611,7 @@ docker exec 5g-sim-host \
     --memory=128m --cpus=0.1 \
     --restart     unless-stopped \
     --cap-add     NET_ADMIN \
+    --device      /dev/net/tun \
     -v /sim/config/ueransim/ue-iot:/etc/ueransim:ro \
     towards5gs/ueransim-ue \
     /ueransim/build/nr-ue -c /etc/ueransim/ue-iot-7.yaml
@@ -1377,6 +1636,7 @@ docker exec 5g-sim-host \
     --memory=128m --cpus=0.1 \
     --restart     unless-stopped \
     --cap-add     NET_ADMIN \
+    --device      /dev/net/tun \
     -v /sim/config/ueransim/ue-iot:/etc/ueransim:ro \
     towards5gs/ueransim-ue \
     /ueransim/build/nr-ue -c /etc/ueransim/ue-iot-8.yaml
@@ -1401,6 +1661,7 @@ docker exec 5g-sim-host \
     --memory=128m --cpus=0.1 \
     --restart     unless-stopped \
     --cap-add     NET_ADMIN \
+    --device      /dev/net/tun \
     -v /sim/config/ueransim/ue-iot:/etc/ueransim:ro \
     towards5gs/ueransim-ue \
     /ueransim/build/nr-ue -c /etc/ueransim/ue-iot-9.yaml
@@ -1425,6 +1686,7 @@ docker exec 5g-sim-host \
     --memory=128m --cpus=0.1 \
     --restart     unless-stopped \
     --cap-add     NET_ADMIN \
+    --device      /dev/net/tun \
     -v /sim/config/ueransim/ue-iot:/etc/ueransim:ro \
     towards5gs/ueransim-ue \
     /ueransim/build/nr-ue -c /etc/ueransim/ue-iot-10.yaml
