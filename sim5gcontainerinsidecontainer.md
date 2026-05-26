@@ -54,6 +54,86 @@ HOST MACHINE
 
 ---
 
+## Restart After Host Reboot
+
+The `gtp5g` kernel module is loaded into RAM only (`insmod`). It does **not** survive a host
+shutdown or reboot and must be reloaded before starting the simulation. Everything else
+(named volumes, inner containers, MongoDB data, CHF locality patch) persists on disk.
+
+```bash
+# A — Reload gtp5g v0.8.6 (mandatory after every host reboot)
+docker run --rm --privileged \
+    -v /lib/modules:/lib/modules \
+    -v /usr/src:/usr/src \
+    ubuntu:22.04 \
+    sh -c "apt-get update -qq && \
+           apt-get install -y git make gcc-12 kmod linux-headers-\$(uname -r) 2>/dev/null && \
+           ln -sf /usr/bin/gcc-12 /usr/bin/gcc && \
+           git clone --depth 1 --branch v0.8.6 https://github.com/free5gc/gtp5g.git && \
+           cd gtp5g && make && \
+           rmmod gtp5g 2>/dev/null || true && \
+           insmod gtp5g.ko && \
+           echo 'gtp5g v0.8.6 loaded OK'"
+
+# B — Recreate the outer container (rm is safe — all data is in volumes)
+#     docker start fails with stale /var/run/docker.pid after unclean shutdown;
+#     docker rm + docker run with rm -f prepended avoids the loop permanently.
+docker rm 5g-sim-host
+docker run -d \
+  --name        5g-sim-host \
+  --privileged \
+  --cgroupns=host \
+  --memory=16g \
+  --cpus=10 \
+  --memory-swap=16g \
+  --shm-size=1g \
+  --sysctl      net.ipv4.ip_forward=1 \
+  -v /home/rifqi/thesis-rifqi/5gproj:/sim \
+  -v 5g-sim-docker:/var/lib/docker \
+  -v 5g-sim-mongo:/mongo-data \
+  -v 5g-sim-ns3:/ns3-build \
+  -v 5g-sim-results:/sim-results \
+  -p 5000:5000 \
+  docker:26-dind \
+  sh -c "rm -f /var/run/docker.pid; modprobe udp_tunnel; modprobe gtp; \
+         dockerd --host=unix:///var/run/docker.sock \
+                 --storage-driver=overlay2 \
+                 --iptables=true \
+                 --ip-forward=true"
+
+# C — Wait for inner daemon, then let --restart unless-stopped containers come up
+until docker exec 5g-sim-host docker info >/dev/null 2>&1; do sleep 2 && printf "."; done
+echo " inner daemon ready"
+sleep 20
+
+# D — Re-patch CHF locality (CHF re-registers with NRF on startup, losing locality)
+docker exec 5g-sim-host docker exec 5g-sim-mongodb mongo free5gc --quiet --eval '
+  db.NfProfile.updateOne({nfType:"CHF"},{$set:{locality:"area1"}});
+  print("CHF locality patched");
+'
+
+# E — Restart SMF so it re-discovers CHF with patched locality
+docker exec 5g-sim-host docker restart 5g-sim-smf-embb 5g-sim-smf-mtc
+sleep 5
+
+# F — Restart gNB (AMF loses NGAP state), then all UEs
+docker exec 5g-sim-host docker restart 5g-sim-gnb
+sleep 5
+docker exec 5g-sim-host docker restart \
+  5g-sim-ue-video-1 5g-sim-ue-video-2 \
+  5g-sim-ue-iot-1 5g-sim-ue-iot-2 5g-sim-ue-iot-3
+sleep 15
+
+# Verify all 5 TUN interfaces are up
+for ue in video-1 video-2 iot-1 iot-2 iot-3; do
+  printf "=== ue-%-9s " "$ue ==="
+  docker exec 5g-sim-host docker exec 5g-sim-ue-$ue \
+    ip -brief addr show uesimtun0 2>&1 | head -1
+done
+```
+
+---
+
 ## Step 0 — Create Directory Structure
 
 Run this on the host once to create all directories and install the gtp5g kernel module:
@@ -69,17 +149,17 @@ Install GTP5G module (free5GC v3.4.1 requires gtp5g **v0.8.6**):
 
 ```bash
 docker run --rm --privileged \
-    -v /lib/modules:/lib/modules \
-    -v /usr/src:/usr/src \
-    ubuntu:22.04 \
-    sh -c "apt-get update -qq && \
-           apt-get install -y git make gcc-12 kmod linux-headers-\$(uname -r) 2>/dev/null && \
-           ln -sf /usr/bin/gcc-12 /usr/bin/gcc && \
-           git clone --depth 1 --branch v0.8.6 https://github.com/free5gc/gtp5g.git && \
-           cd gtp5g && make && \
-           rmmod gtp5g 2>/dev/null || true && \
-           insmod gtp5g.ko && \
-           echo 'gtp5g v0.8.6 loaded OK'"
+-v /lib/modules:/lib/modules \
+-v /usr/src:/usr/src \
+ubuntu:22.04 \
+sh -c "apt-get update -qq && \
+apt-get install -y git make gcc-12 kmod linux-headers-\$(uname -r) 2>/dev/null && \
+ln -sf /usr/bin/gcc-12 /usr/bin/gcc && \
+git clone --depth 1 --branch v0.8.6 https://github.com/free5gc/gtp5g.git && \
+cd gtp5g && make && \
+rmmod gtp5g 2>/dev/null || true && \
+insmod gtp5g.ko && \
+echo 'gtp5g v0.8.6 loaded OK'"
 ```
 
 ---
@@ -114,7 +194,7 @@ docker run -d \
   -v 5g-sim-results:/sim-results \
   -p 5000:5000 \
   docker:26-dind \
-  sh -c "modprobe udp_tunnel; modprobe gtp; \
+  sh -c "rm -f /var/run/docker.pid; modprobe udp_tunnel; modprobe gtp; \
          dockerd --host=unix:///var/run/docker.sock \
                  --storage-driver=overlay2 \
                  --iptables=true \
@@ -1706,7 +1786,232 @@ docker exec 5g-sim-host docker exec 5g-sim-ue-iot-1 ip addr show uesimtun0
 
 ---
 
+## Step 32.5 — Write NS-3 Simulation Script
+
+Creates the `manufacturing-5g.cc` C++ simulation file on the host before the NS-3
+container copies it into the build tree.
+
+```bash
+mkdir -p /home/rifqi/thesis-rifqi/5gproj/ns3-sim/scratch [Noneed]
+
+cat > /home/rifqi/thesis-rifqi/5gproj/ns3-sim/scratch/manufacturing-5g.cc << 'EOF'
+/* manufacturing-5g.cc
+ * 5G manufacturing use-case — ns-3.40 + 5g-lena-v2.6.y
+ * Two slices: eMBB (2 video UEs, DL) + mMTC (3 IoT UEs, UL)
+ */
+#include "ns3/applications-module.h"
+#include "ns3/core-module.h"
+#include "ns3/flow-monitor-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/mobility-module.h"
+#include "ns3/network-module.h"
+#include "ns3/nr-module.h"
+#include "ns3/point-to-point-module.h"
+
+using namespace ns3;
+NS_LOG_COMPONENT_DEFINE("Manufacturing5g");
+
+int
+main(int argc, char* argv[])
+{
+    double   simTime  = 30.0;
+    bool     useTap   = false;
+    uint16_t prbEmbb  = 70;
+    uint16_t prbMmtc  = 36;
+
+    CommandLine cmd(__FILE__);
+    cmd.AddValue("simTime", "Simulation duration (s)",             simTime);
+    cmd.AddValue("useTap",  "TAP bridge — not used in standalone", useTap);
+    cmd.AddValue("prbEmbb", "RBs for eMBB slice",                  prbEmbb);
+    cmd.AddValue("prbMmtc", "RBs for mMTC slice",                  prbMmtc);
+    cmd.Parse(argc, argv);
+
+    // --- Spectrum: one band covering both slices ---
+    double totalBw = (prbEmbb + prbMmtc) * 12.0 * 15e3; // 15 kHz SCS, 12 SC/RB
+    CcBwpCreator ccBwpCreator;
+    CcBwpCreator::SimpleOperationBandConf bandConf(3.5e9, totalBw, 1,
+                                                   BandwidthPartInfo::UMa);
+    OperationBandInfo          band    = ccBwpCreator.CreateOperationBandContiguousCc(bandConf);
+    BandwidthPartInfoPtrVector allBwps = CcBwpCreator::GetAllBwps({band});
+
+    // --- Nodes ---
+    NodeContainer gnbNodes, videoUeNodes, iotUeNodes;
+    gnbNodes.Create(1);
+    videoUeNodes.Create(2);
+    iotUeNodes.Create(3);
+
+    // --- Mobility (static factory floor) ---
+    MobilityHelper mobility;
+    mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+    Ptr<ListPositionAllocator> pos = CreateObject<ListPositionAllocator>();
+    pos->Add(Vector(  0.0,   0.0, 10.0)); // gNB
+    pos->Add(Vector( 10.0,   0.0,  1.5)); // video-1
+    pos->Add(Vector(-10.0,   0.0,  1.5)); // video-2
+    pos->Add(Vector( 25.0,  20.0,  1.0)); // iot-1
+    pos->Add(Vector(-25.0,  15.0,  1.0)); // iot-2
+    pos->Add(Vector(  5.0, -30.0,  1.0)); // iot-3
+    mobility.SetPositionAllocator(pos);
+    mobility.Install(gnbNodes);
+    mobility.Install(videoUeNodes);
+    mobility.Install(iotUeNodes);
+
+    // --- NR stack ---
+    Ptr<NrPointToPointEpcHelper> epcHelper = CreateObject<NrPointToPointEpcHelper>();
+    Ptr<NrHelper>                nrHelper  = CreateObject<NrHelper>();
+    nrHelper->SetEpcHelper(epcHelper);
+    nrHelper->SetSchedulerTypeId(TypeId::LookupByName("ns3::NrMacSchedulerTdmaRR"));
+
+    NetDeviceContainer gnbDev     = nrHelper->InstallGnbDevice(gnbNodes,     allBwps);
+    NetDeviceContainer videoUeDev = nrHelper->InstallUeDevice(videoUeNodes,   allBwps);
+    NetDeviceContainer iotUeDev   = nrHelper->InstallUeDevice(iotUeNodes,     allBwps);
+
+    // --- Internet stack & IP addresses ---
+    InternetStackHelper inet;
+    inet.Install(videoUeNodes);
+    inet.Install(iotUeNodes);
+    Ipv4InterfaceContainer videoIp = epcHelper->AssignUeIpv4Address(videoUeDev);
+    Ipv4InterfaceContainer iotIp   = epcHelper->AssignUeIpv4Address(iotUeDev);
+
+    Ipv4StaticRoutingHelper routing;
+    NodeContainer allUeNodes;
+    allUeNodes.Add(videoUeNodes);
+    allUeNodes.Add(iotUeNodes);
+    for (uint32_t i = 0; i < allUeNodes.GetN(); i++)
+        routing.GetStaticRouting(allUeNodes.Get(i)->GetObject<Ipv4>())
+               ->SetDefaultRoute(epcHelper->GetUeDefaultGatewayAddress(), 1);
+
+    // --- Attach ---
+    nrHelper->AttachToClosestGnb(videoUeDev, gnbDev);
+    nrHelper->AttachToClosestGnb(iotUeDev,   gnbDev);
+
+    // --- Remote host ---
+    NodeContainer remoteHostContainer;
+    remoteHostContainer.Create(1);
+    inet.Install(remoteHostContainer);
+    Ptr<Node> remoteHost = remoteHostContainer.Get(0);
+
+    PointToPointHelper p2p;
+    p2p.SetDeviceAttribute("DataRate", StringValue("10Gbps"));
+    p2p.SetChannelAttribute("Delay",   StringValue("1ms"));
+    NetDeviceContainer internetLink = p2p.Install(epcHelper->GetPgwNode(), remoteHost);
+    Ipv4AddressHelper  ipv4h;
+    ipv4h.SetBase("1.0.0.0", "255.0.0.0");
+    Ipv4InterfaceContainer internetIp = ipv4h.Assign(internetLink);
+    Ipv4Address remoteHostAddr = internetIp.GetAddress(1);
+    routing.GetStaticRouting(remoteHost->GetObject<Ipv4>())
+           ->AddNetworkRouteTo(Ipv4Address("7.0.0.0"), Ipv4Mask("255.0.0.0"), 1);
+
+    // --- Traffic ---
+    const double   appStart  = 0.5;
+    const double   appStop   = simTime - 0.1;
+    const uint16_t videoPort = 9000;
+    const uint16_t iotPort   = 9001;
+
+    // eMBB: 6 Mbps downlink (remote → video UE)
+    for (uint32_t i = 0; i < videoUeNodes.GetN(); i++)
+    {
+        UdpClientHelper dlClient(videoIp.GetAddress(i), videoPort);
+        dlClient.SetAttribute("MaxPackets", UintegerValue(0xFFFFFFFF));
+        dlClient.SetAttribute("Interval",   TimeValue(MicroSeconds(1333)));
+        dlClient.SetAttribute("PacketSize", UintegerValue(1000));
+        auto apps = dlClient.Install(remoteHost);
+        apps.Start(Seconds(appStart));
+        apps.Stop(Seconds(appStop));
+
+        PacketSinkHelper sink("ns3::UdpSocketFactory",
+                              InetSocketAddress(Ipv4Address::GetAny(), videoPort));
+        auto sinkApps = sink.Install(videoUeNodes.Get(i));
+        sinkApps.Start(Seconds(0.1));
+        sinkApps.Stop(Seconds(simTime));
+    }
+
+    // mMTC: 100-byte uplink every 1 s (IoT UE → remote)
+    for (uint32_t i = 0; i < iotUeNodes.GetN(); i++)
+    {
+        UdpClientHelper ulClient(remoteHostAddr, iotPort);
+        ulClient.SetAttribute("MaxPackets", UintegerValue(0xFFFFFFFF));
+        ulClient.SetAttribute("Interval",   TimeValue(Seconds(1.0)));
+        ulClient.SetAttribute("PacketSize", UintegerValue(100));
+        auto apps = ulClient.Install(iotUeNodes.Get(i));
+        apps.Start(Seconds(appStart));
+        apps.Stop(Seconds(appStop));
+
+        PacketSinkHelper sink("ns3::UdpSocketFactory",
+                              InetSocketAddress(Ipv4Address::GetAny(), iotPort));
+        auto sinkApps = sink.Install(remoteHost);
+        sinkApps.Start(Seconds(0.1));
+        sinkApps.Stop(Seconds(simTime));
+    }
+
+    // --- Flow monitor ---
+    FlowMonitorHelper flowHelper;
+    Ptr<FlowMonitor>  monitor = flowHelper.InstallAll();
+
+    Simulator::Stop(Seconds(simTime));
+    Simulator::Run();
+
+    // --- Results ---
+    monitor->CheckForLostPackets();
+    auto classifier = DynamicCast<Ipv4FlowClassifier>(flowHelper.GetClassifier());
+    auto stats      = monitor->GetFlowStats();
+
+    std::cout << "\n========== Manufacturing 5G Results ==========\n"
+              << "eMBB PRBs=" << prbEmbb << "  mMTC PRBs=" << prbMmtc
+              << "  simTime=" << simTime << "s\n\n";
+
+    double embbRx = 0, mmtcRx = 0, embbDelay = 0, mmtcDelay = 0;
+    uint32_t embbN = 0, mmtcN = 0;
+
+    for (auto& kv : stats)
+    {
+        auto   t        = classifier->FindFlow(kv.first);
+        double dur      = appStop - appStart;
+        double rxMbps   = kv.second.rxBytes * 8.0 / dur / 1e6;
+        double delayMs  = (kv.second.rxPackets > 0)
+                          ? kv.second.delaySum.GetMilliSeconds() / kv.second.rxPackets
+                          : 0.0;
+
+        bool isEmbb = (t.destinationPort == videoPort || t.sourcePort == videoPort);
+        bool isMmtc = (t.destinationPort == iotPort   || t.sourcePort == iotPort);
+
+        if (isEmbb) { embbRx += rxMbps; embbDelay += delayMs; embbN++; }
+        else if (isMmtc) { mmtcRx += rxMbps; mmtcDelay += delayMs; mmtcN++; }
+
+        std::cout << (isEmbb ? "[eMBB]" : isMmtc ? "[mMTC]" : "[----]")
+                  << " flow=" << kv.first
+                  << " " << t.sourceAddress << ":" << t.sourcePort
+                  << "->" << t.destinationAddress << ":" << t.destinationPort
+                  << " rx=" << rxMbps << "Mbps"
+                  << " delay=" << delayMs << "ms"
+                  << " lost=" << kv.second.lostPackets << "\n";
+    }
+
+    std::cout << "\n--- Slice summary ---\n"
+              << "eMBB : rx=" << embbRx << " Mbps"
+              << "  avg_delay=" << (embbN ? embbDelay/embbN : 0) << " ms"
+              << "  prb=" << prbEmbb << "\n"
+              << "mMTC : rx=" << mmtcRx << " Mbps"
+              << "  avg_delay=" << (mmtcN ? mmtcDelay/mmtcN : 0) << " ms"
+              << "  prb=" << prbMmtc << "\n";
+
+    monitor->SerializeToXmlFile("/sim-results/flow-monitor.xml", true, true);
+    Simulator::Destroy();
+    return 0;
+}
+EOF
+```
+
+---
+
 ## Step 33 — NS-3 Radio Simulation
+
+If the `5g-sim-ns3` container already exists from a previous attempt, remove it first:
+
+```bash
+docker exec 5g-sim-host docker rm -f 5g-sim-ns3 2>/dev/null || true
+```
+
+Write the startup script and launch the container:
 
 ```bash
 docker exec 5g-sim-host sh -c 'cat > /tmp/ns3-start.sh << "SCRIPT"
@@ -1715,26 +2020,29 @@ set -e
 NS3_DIR="/ns3-build/ns-3-dev"
 echo "[ns3] Installing build deps ..."
 apt-get update -qq && apt-get install -y --no-install-recommends \
-  g++ cmake ninja-build python3 git \
-  libboost-all-dev libgsl-dev libsqlite3-dev libeigen3-dev ccache \
-  >/dev/null 2>&1
+  ca-certificates g++ cmake ninja-build python3 git \
+  libboost-all-dev libgsl-dev libsqlite3-dev libeigen3-dev \
+  libxml2-dev libxml2 ccache \
+  2>&1 | grep -v "^Get:\|^Fetched\|^Reading\|^Building\|Unpacking\|Selecting"
 if [ ! -d "${NS3_DIR}" ]; then
   echo "[ns3] Cloning NS-3 3.40 ..."
   git clone --depth 1 --branch ns-3.40 \
     https://gitlab.com/nsnam/ns-3-dev.git "${NS3_DIR}"
   echo "[ns3] Cloning 5G-LENA nr module ..."
-  git clone --depth 1 --branch 5g-lena-v3.1 \
+  git clone --depth 1 --branch 5g-lena-v2.6.y \
     https://gitlab.com/cttc-lena/nr.git "${NS3_DIR}/contrib/nr"
 else
   echo "[ns3] Using cached build at ${NS3_DIR}"
 fi
 cp -f /sim/ns3-sim/scratch/manufacturing-5g.cc "${NS3_DIR}/scratch/"
 cd "${NS3_DIR}"
+echo "[ns3] Configuring ..."
 python3 ns3 configure \
-  --enable-modules=nr,internet,point-to-point,tap-bridge,fd-net-device,flow-monitor \
-  --build-profile=optimized --disable-examples --disable-tests >/dev/null 2>&1
-echo "[ns3] Building (first run ~30 min) ..."
-python3 ns3 build -j$(nproc) 2>&1 | tail -3
+  --enable-modules=nr,internet,applications,mobility,point-to-point,tap-bridge,fd-net-device,flow-monitor \
+  --build-profile=optimized --disable-examples --disable-tests
+echo "[ns3] Building (first run ~30–60 min, output goes to /tmp/build.log) ..."
+python3 ns3 build -j4 2>&1 | tee /tmp/build.log
+echo "[ns3] Build complete."
 mkdir -p /sim-results && cd /sim-results
 echo "[ns3] Running simulation ..."
 python3 "${NS3_DIR}/ns3" run \
@@ -1763,6 +2071,13 @@ Follow NS-3 build progress:
 
 ```bash
 docker exec 5g-sim-host docker logs -f 5g-sim-ns3
+```
+
+If the build fails, inspect the full error:
+
+```bash
+# Show last 60 lines of build log (includes all compiler errors)
+docker exec 5g-sim-host docker exec 5g-sim-ns3 tail -60 /tmp/build.log
 ```
 
 ---
