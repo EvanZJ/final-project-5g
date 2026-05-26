@@ -1860,6 +1860,7 @@ main(int argc, char* argv[])
     Ptr<NrHelper>                nrHelper  = CreateObject<NrHelper>();
     nrHelper->SetEpcHelper(epcHelper);
     nrHelper->SetSchedulerTypeId(TypeId::LookupByName("ns3::NrMacSchedulerTdmaRR"));
+    nrHelper->InitializeOperationBand(&band); // sets up spectrum channel + pathloss
 
     NetDeviceContainer gnbDev     = nrHelper->InstallGnbDevice(gnbNodes,     allBwps);
     NetDeviceContainer videoUeDev = nrHelper->InstallUeDevice(videoUeNodes,   allBwps);
@@ -1881,8 +1882,8 @@ main(int argc, char* argv[])
                ->SetDefaultRoute(epcHelper->GetUeDefaultGatewayAddress(), 1);
 
     // --- Attach ---
-    nrHelper->AttachToClosestGnb(videoUeDev, gnbDev);
-    nrHelper->AttachToClosestGnb(iotUeDev,   gnbDev);
+    nrHelper->AttachToClosestEnb(videoUeDev, gnbDev);
+    nrHelper->AttachToClosestEnb(iotUeDev,   gnbDev);
 
     // --- Remote host ---
     NodeContainer remoteHostContainer;
@@ -2024,23 +2025,33 @@ apt-get update -qq && apt-get install -y --no-install-recommends \
   libboost-all-dev libgsl-dev libsqlite3-dev libeigen3-dev \
   libxml2-dev libxml2 ccache \
   2>&1 | grep -v "^Get:\|^Fetched\|^Reading\|^Building\|Unpacking\|Selecting"
+
 if [ ! -d "${NS3_DIR}" ]; then
   echo "[ns3] Cloning NS-3 3.40 ..."
   git clone --depth 1 --branch ns-3.40 \
     https://gitlab.com/nsnam/ns-3-dev.git "${NS3_DIR}"
+else
+  echo "[ns3] Using cached NS-3 at ${NS3_DIR}"
+fi
+
+# Check contrib/nr separately — may be missing even if ns-3-dev exists in cache
+if [ ! -d "${NS3_DIR}/contrib/nr" ]; then
   echo "[ns3] Cloning 5G-LENA nr module ..."
   git clone --depth 1 --branch 5g-lena-v2.6.y \
     https://gitlab.com/cttc-lena/nr.git "${NS3_DIR}/contrib/nr"
+  echo "[ns3] 5G-LENA cloned — forcing reconfigure"
+  rm -f "${NS3_DIR}/cmake-cache/CMakeCache.txt"
 else
-  echo "[ns3] Using cached build at ${NS3_DIR}"
+  echo "[ns3] Using cached nr module at ${NS3_DIR}/contrib/nr"
 fi
+
 cp -f /sim/ns3-sim/scratch/manufacturing-5g.cc "${NS3_DIR}/scratch/"
 cd "${NS3_DIR}"
-echo "[ns3] Configuring ..."
+echo "[ns3] Configuring - nr module detected from contrib/nr ..."
 python3 ns3 configure \
   --enable-modules=nr,internet,applications,mobility,point-to-point,tap-bridge,fd-net-device,flow-monitor \
   --build-profile=optimized --disable-examples --disable-tests
-echo "[ns3] Building (first run ~30–60 min, output goes to /tmp/build.log) ..."
+echo "[ns3] Building (first run ~30–60 min, full output in /tmp/build.log) ..."
 python3 ns3 build -j4 2>&1 | tee /tmp/build.log
 echo "[ns3] Build complete."
 mkdir -p /sim-results && cd /sim-results
