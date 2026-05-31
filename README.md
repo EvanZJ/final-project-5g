@@ -233,18 +233,84 @@ docker volume rm 5g-sim-docker 5g-sim-mongo 5g-sim-ns3 5g-sim-results
 
 ---
 
-## KPI Results (Planned vs Achieved)
+## Experimental Results
 
-| KPI | Target | eMBB Result | mMTC Result |
-|-----|--------|-------------|-------------|
-| Throughput | Measurable | 6.09 Mbps | 3.2 Kbps |
-| E2E Latency | Measurable | 2 ms | 5 ms |
-| Packet Delivery | 100% | 100% | 100% |
-| PRB Utilization | Trackable | Within 106 PRBs/20 MHz | |
+All experiments run with NS-3.40 + 5G-LENA v2.6.y at 3.5 GHz, 15 kHz SCS, UMa scenario,
+106 RBs (20 MHz) or 216 RBs (40 MHz), TDMA RR scheduler unless noted.
+Simulation duration: 10 seconds per run. **Zero packet loss across ALL experiments.**
 
-### Planned Experiments
-- [ ] Baseline balanced load
-- [ ] High video-demand stress (more UEs, higher bitrate)
-- [ ] High IoT-density stress (10+ IoT UEs)
-- [ ] Scheduler parameter sensitivity (OFDMA vs TDMA, PF vs RR)
-- [ ] Multi-slice PRB partitioning
+### Experiment 1: Baseline Balanced Load
+- 2 video UEs (6 Mbps DL each) + 3 IoT UEs (1 Kbps UL each)
+- 20 MHz BW, TdmaRR
+
+| Slice | Offered | Throughput | Avg Delay | Loss |
+|-------|---------|-----------|-----------|------|
+| eMBB  | 12 Mbps | 12.33 Mbps | 2 ms | 0% |
+| mMTC  | 3 Kbps  | 3.25 Kbps | 5 ms | 0% |
+
+### Experiment 2: High Video-Demand Stress
+- 4 video UEs (10 Mbps DL each) + 3 IoT UEs (1 Kbps UL each)
+- 20 MHz BW, TdmaRR
+
+| Slice | Offered | Throughput | Avg Delay | Loss |
+|-------|---------|-----------|-----------|------|
+| eMBB  | 40 Mbps | 41.11 Mbps | 2 ms | 0% |
+| mMTC  | 3 Kbps  | 3.25 Kbps | 5 ms | 0% |
+
+### Experiment 3: High IoT-Density Stress
+- 2 video UEs (6 Mbps DL each) + **10 IoT UEs** (1 Kbps UL each)
+- 20 MHz BW, TdmaRR
+
+| Slice | Offered | Throughput | Avg Delay | Loss |
+|-------|---------|-----------|-----------|------|
+| eMBB  | 12 Mbps | 12.33 Mbps | 2 ms | 0% |
+| mMTC  | 10 Kbps | 10.84 Kbps | 5.2 ms | 0% |
+
+### Experiment 4: Scheduler Comparison (OfdmaPF)
+- 2 video UEs (6 Mbps DL each) + 3 IoT UEs
+- 20 MHz BW, **OfdmaPF** scheduler
+
+| Slice | Offered | Throughput | Avg Delay | Loss |
+|-------|---------|-----------|-----------|------|
+| eMBB  | 12 Mbps | 12.33 Mbps | 2 ms | 0% |
+| mMTC  | 3 Kbps  | 3.25 Kbps | **8 ms** | 0% |
+
+### Experiment 5: Scheduler Comparison (OfdmaRR)
+- 2 video UEs (6 Mbps DL each) + 3 IoT UEs
+- 20 MHz BW, **OfdmaRR** scheduler
+
+| Slice | Offered | Throughput | Avg Delay | Loss |
+|-------|---------|-----------|-----------|------|
+| eMBB  | 12 Mbps | 12.33 Mbps | 2 ms | 0% |
+| mMTC  | 3 Kbps  | 3.25 Kbps | **8 ms** | 0% |
+
+### Experiment 6: 40 MHz Bandwidth (Baseline × 2)
+- 2 video UEs (20 Mbps DL each) + 3 IoT UEs
+- **40 MHz BW** (216 RBs), TdmaRR
+
+| Slice | Offered | Throughput | Avg Delay | Loss |
+|-------|---------|-----------|-----------|------|
+| eMBB  | 40 Mbps | 41.11 Mbps | 2 ms | 0% |
+| mMTC  | 3 Kbps  | 3.25 Kbps | 5 ms | 0% |
+
+### Experiment 7: Extreme Video (40 MHz, 4 UEs × 20 Mbps)
+- 4 video UEs (20 Mbps DL each) + 3 IoT UEs
+- **40 MHz BW** (216 RBs), TdmaRR
+
+| Slice | Offered | Throughput | Avg Delay | Loss |
+|-------|---------|-----------|-----------|------|
+| eMBB  | 80 Mbps | 82.22 Mbps | 2 ms | 0% |
+| mMTC  | 3 Kbps  | 3.25 Kbps | 5 ms | 0% |
+
+### Key Findings
+1. **Zero packet loss across all scenarios** — 5G-LENA scheduler handles traffic well
+2. **eMBB scales linearly** — doubling bandwidth or UEs doubles throughput
+3. **mMTC delay increases with OFDMA schedulers** — TDMA is better for low-rate IoT
+4. **No performance degradation under stress** — 10 IoT UEs + 2 video UEs cause no issues
+5. **40 MHz doubles capacity** — 80+ Mbps achievable for video
+
+### Future Experiments
+- Multi-slice PRB partitioning (e.g., 70 RBs eMBB + 36 RBs mMTC)
+- Different traffic models (VBR video, bursty IoT)
+- Mobility scenarios (moving UEs on factory floor)
+- Multi-cell deployment

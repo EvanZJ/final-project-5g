@@ -1,0 +1,57 @@
+Processing triggers for libc-bin (2.35-0ubuntu3.13) ...
+### baseline ###
+
+===== baseline =====
+Scenario: baseline | Scheduler: TdmaRR | Video UEs: 2 | IoT UEs: 3 | Video rate: 6 Mbps/UE
+eMBB: rx=12.3341 Mbps delay=2 ms lost=0 pkts
+mMTC: rx=0.00325271 Mbps delay=5 ms lost=0 pkts
+===== END =====
+
+### high_video ###
+
+===== high_video =====
+Scenario: high_video | Scheduler: TdmaRR | Video UEs: 4 | IoT UEs: 3 | Video rate: 10 Mbps/UE
+eMBB: rx=41.1084 Mbps delay=2 ms lost=0 pkts
+mMTC: rx=0.00325271 Mbps delay=5 ms lost=0 pkts
+===== END =====
+
+### high_iot ###
+
+===== high_iot =====
+Scenario: high_iot | Scheduler: TdmaRR | Video UEs: 2 | IoT UEs: 10 | Video rate: 6 Mbps/UE
+eMBB: rx=12.3341 Mbps delay=2 ms lost=0 pkts
+mMTC: rx=0.0108424 Mbps delay=5.2 ms lost=0 pkts
+===== END =====
+
+### sched_ofdma_pf ###
+
+===== sched_ofdma_pf =====
+Scenario: sched_ofdma_pf | Scheduler: OfdmaPF | Video UEs: 2 | IoT UEs: 3 | Video rate: 6 Mbps/UE
+eMBB: rx=12.3321 Mbps delay=2 ms lost=0 pkts
+mMTC: rx=0.00325271 Mbps delay=8 ms lost=0 pkts
+===== END =====
+
+### sched_ofdma_rr ###
+
+===== sched_ofdma_rr =====
+Scenario: sched_ofdma_rr | Scheduler: OfdmaRR | Video UEs: 2 | IoT UEs: 3 | Video rate: 6 Mbps/UE
+eMBB: rx=12.3321 Mbps delay=2 ms lost=0 pkts
+mMTC: rx=0.00325271 Mbps delay=8 ms lost=0 pkts
+===== END =====
+
+### bw40_baseline ###
+
+===== bw40_baseline =====
+Scenario: bw40_baseline | Scheduler: TdmaRR | Video UEs: 2 | IoT UEs: 3 | Video rate: 20 Mbps/UE
+eMBB: rx=41.1084 Mbps delay=2 ms lost=0 pkts
+mMTC: rx=0.00325271 Mbps delay=5 ms lost=0 pkts
+===== END =====
+
+### bw40_extreme_video ###
+
+===== bw40_extreme_video =====
+Scenario: bw40_extreme_video | Scheduler: TdmaRR | Video UEs: 4 | IoT UEs: 3 | Video rate: 20 Mbps/UE
+eMBB: rx=82.2168 Mbps delay=2 ms lost=0 pkts
+mMTC: rx=0.00325271 Mbps delay=5 ms lost=0 pkts
+===== END =====
+
