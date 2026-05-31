@@ -1,0 +1,49 @@
+info:
+  version: 1.0.3
+  description: CHF configuration
+
+configuration:
+  chfName: CHF
+  sbi:
+    scheme: http
+    registerIPv4: 10.100.0.26
+    bindingIPv4: 0.0.0.0
+    port: 8000
+  nrfUri: http://10.100.0.20:8000
+  locality: area1
+  serviceNameList:
+    - nchf-convergedcharging
+  mongodb:
+    name: free5gc
+    url: mongodb://10.100.0.10:27017
+    quotaValidityTime: 10000
+    volumeLimit: 50000
+    volumeLimitPDU: 10000
+    volumeThresholdRate: 0.8
+  cgf:
+    hostIPv4: 10.100.0.50
+    port: 2122
+    listenPort: 2121
+    tls:
+      pem: cert/chf.pem
+      key: cert/chf.key
+    cdrFilePath: /tmp
+  abmfDiameter:
+    protocol: tcp
+    hostIPv4: 10.100.0.26
+    port: 3868
+    tls:
+      pem: cert/chf.pem
+      key: cert/chf.key
+  rfDiameter:
+    protocol: tcp
+    hostIPv4: 10.100.0.26
+    port: 3869
+    tls:
+      pem: cert/chf.pem
+      key: cert/chf.key
+
+logger:
+  enable: true
+  level: info
+  reportCaller: false

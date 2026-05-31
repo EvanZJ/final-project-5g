@@ -1,0 +1,24 @@
+version: 1.0.3
+description: UPF eMBB configuration
+
+pfcp:
+  addr: 10.100.0.40
+  nodeID: 10.100.0.40
+  retransTimeout: 1s
+  maxRetrans: 3
+
+gtpu:
+  forwarder: gtp5g
+  ifList:
+    - addr: 10.100.0.40
+      type: N3
+
+dnnList:
+  - dnn: video
+    cidr: 10.61.0.0/16
+    natifname: eth0
+
+logger:
+  enable: true
+  level: info
+  reportCaller: false

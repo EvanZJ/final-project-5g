@@ -1,0 +1,74 @@
+info:
+  version: 1.0.7
+  description: SMF mMTC configuration
+
+configuration:
+  smfName: SMF-mMTC
+  sbi:
+    scheme: http
+    registerIPv4: 10.100.0.32
+    bindingIPv4: 0.0.0.0
+    port: 8000
+  serviceNameList:
+    - nsmf-pdusession
+    - nsmf-event-exposure
+    - nsmf-oam
+  snssaiInfos:
+    - sNssai:
+        sst: 3
+        sd: 000002
+      dnnInfos:
+        - dnn: iot
+          dns:
+            ipv4: 8.8.8.8
+  plmnList:
+    - mcc: "999"
+      mnc: "70"
+  locality: area1
+  pfcp:
+    addr: 10.100.0.32
+    nodeID: 10.100.0.32
+    listenAddr: 10.100.0.32
+    externalAddr: 10.100.0.32
+  userplaneInformation:
+    upNodes:
+      gNB1:
+        type: AN
+      UPF:
+        type: UPF
+        nodeID: 5g-sim-upf-mtc
+        addr: 10.100.0.41
+        sNssaiUpfInfos:
+          - sNssai:
+              sst: 3
+              sd: 000002
+            dnnUpfInfoList:
+              - dnn: iot
+                pools:
+                  - cidr: 10.62.0.0/16
+        interfaces:
+          - interfaceType: N3
+            endpoints:
+              - 10.100.0.41
+            networkInstances:
+              - internet
+    links:
+      - A: gNB1
+        B: UPF
+  t3591:
+    enable: true
+    expireTime: 16s
+    maxRetryTimes: 3
+  t3592:
+    enable: true
+    expireTime: 16s
+    maxRetryTimes: 3
+  nrfUri: http://10.100.0.20:8000
+  urrPeriod: 10
+  urrThreshold: 1000
+  requestedUnit: 1000
+
+logger:
+  enable: true
+  level: info
+  reportCaller: false

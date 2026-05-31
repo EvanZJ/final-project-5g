@@ -1,0 +1,74 @@
+info:
+  version: 1.0.7
+  description: SMF eMBB configuration
+
+configuration:
+  smfName: SMF-eMBB
+  sbi:
+    scheme: http
+    registerIPv4: 10.100.0.31
+    bindingIPv4: 0.0.0.0
+    port: 8000
+  serviceNameList:
+    - nsmf-pdusession
+    - nsmf-event-exposure
+    - nsmf-oam
+  snssaiInfos:
+    - sNssai:
+        sst: 1
+        sd: 000001
+      dnnInfos:
+        - dnn: video
+          dns:
+            ipv4: 8.8.8.8
+  plmnList:
+    - mcc: "999"
+      mnc: "70"
+  locality: area1
+  pfcp:
+    addr: 10.100.0.31
+    nodeID: 10.100.0.31
+    listenAddr: 10.100.0.31
+    externalAddr: 10.100.0.31
+  userplaneInformation:
+    upNodes:
+      gNB1:
+        type: AN
+      UPF:
+        type: UPF
+        nodeID: 5g-sim-upf-embb
+        addr: 10.100.0.40
+        sNssaiUpfInfos:
+          - sNssai:
+              sst: 1
+              sd: 000001
+            dnnUpfInfoList:
+              - dnn: video
+                pools:
+                  - cidr: 10.61.0.0/16
+        interfaces:
+          - interfaceType: N3
+            endpoints:
+              - 10.100.0.40
+            networkInstances:
+              - internet
+    links:
+      - A: gNB1
+        B: UPF
+  t3591:
+    enable: true
+    expireTime: 16s
+    maxRetryTimes: 3
+  t3592:
+    enable: true
+    expireTime: 16s
+    maxRetryTimes: 3
+  nrfUri: http://10.100.0.20:8000
+  urrPeriod: 10
+  urrThreshold: 1000
+  requestedUnit: 1000
+
+logger:
+  enable: true
+  level: debug
+  reportCaller: false

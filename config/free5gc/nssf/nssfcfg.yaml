@@ -1,0 +1,45 @@
+info:
+  version: 1.0.2
+  description: NSSF configuration
+
+configuration:
+  nssfName: NSSF
+  sbi:
+    scheme: http
+    registerIPv4: 10.100.0.24
+    bindingIPv4: 0.0.0.0
+    port: 8000
+  serviceNameList:
+    - nnssf-nsselection
+    - nnssf-nssaiavailability
+  nrfUri: http://10.100.0.20:8000
+  supportedPlmnList:
+    - mcc: "999"
+      mnc: "70"
+  supportedNssaiInPlmnList:
+    - plmnId:
+        mcc: "999"
+        mnc: "70"
+      supportedSnssaiList:
+        - sst: 1
+          sd: "000001"
+        - sst: 3
+          sd: "000002"
+  nsiList:
+    - snssai:
+        sst: 1
+        sd: "000001"
+      nsiInformationList:
+        - nrfId: http://10.100.0.20:8000/nnrf-nfm/v1/nf-instances
+          nsiId: "111"
+    - snssai:
+        sst: 3
+        sd: "000002"
+      nsiInformationList:
+        - nrfId: http://10.100.0.20:8000/nnrf-nfm/v1/nf-instances
+          nsiId: "222"
+
+logger:
+  enable: true
+  level: info
+  reportCaller: false

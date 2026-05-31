@@ -1,0 +1,21 @@
+info:
+  version: 1.0.3
+  description: AUSF configuration
+
+configuration:
+  sbi:
+    scheme: http
+    registerIPv4: 10.100.0.23
+    bindingIPv4: 0.0.0.0
+    port: 8000
+  serviceNameList:
+    - nausf-auth
+  nrfUri: http://10.100.0.20:8000
+  plmnSupportList:
+    - mcc: "999"
+      mnc: "70"
+
+logger:
+  enable: true
+  level: info
+  reportCaller: false
