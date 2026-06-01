@@ -314,3 +314,78 @@ Simulation duration: 10 seconds per run. **Zero packet loss across ALL experimen
 - Different traffic models (VBR video, bursty IoT)
 - Mobility scenarios (moving UEs on factory floor)
 - Multi-cell deployment
+
+---
+
+## Debugging Report
+
+This section documents every significant problem encountered during the project,
+its root cause, and the resolution applied. Problems are grouped by subsystem.
+
+### 1. Network Stack — gtp5g Kernel Module
+
+| Problem | Root Cause | Resolution |
+|---------|-----------|------------|
+| **gtp5g version mismatch** — UPF crashes: `gtp5g version(0.10.2) should be 0.8.6 <= verion < 0.9.0` | free5gc v3.4.1 UPF checks gtp5g version range (0.8.6–0.9.0). Host had gtp5g v0.10.2 (from existing free5gc-compose setup). Cannot load two versions of the same kernel module. | Upgraded all free5gc images from v3.4.1 to v4.2.2, which supports gtp5g v0.10.2. |
+| **UPF `forwarder: gtpu` rejected** — `gtpu does not validate as in(gtp5g)` | free5gc v3.4.1 UPF only accepts `forwarder: gtp5g`. The user-space `gtpu` forwarder is not implemented. | Reverted to `forwarder: gtp5g` and used v4.2.2 UPF image. |
+
+### 2. Core Network — Configuration Format
+
+| Problem | Root Cause | Resolution |
+|---------|-----------|------------|
+| **UDR crash on startup** — `invalid DbConnectorType: non zero value required` | free5gc v4.2.2 UDR config requires explicit `dbConnectorType: mongodb` field. The v3.4.1-style config omitted this. | Added `dbConnectorType: mongodb` to UDR config. |
+| **UDM returns 500 on authentication** — `json: cannot unmarshal string into Go struct field AuthenticationSubscription.sequenceNumber of type models.SequenceNumber` | free5gc v4.2.2 changed `sequenceNumber` format from a hex string to a struct `{sqn: "hex"}`. The old `permanentKey`/`opc` struct fields were replaced with `encPermanentKey`/`encOpcKey` (encrypted strings). | Ran MongoDB migration: converted `sequenceNumber` → `{sqn: ...}`, renamed `permanentKey.permanentKeyValue` → `encPermanentKey`, `opc.opcValue` → `encOpcKey`, added `protectionParameterId: "0"`. |
+| **SMF nil-pointer crash on startup** — `panic: runtime error: invalid memory address or nil pointer dereference` in `nrf_service.go:157` | SMF v4.2.2 expects `plmnList` in config. The v3.4.1 config had no `plmnList`, causing nil pointer in NfProfile construction. | Added `plmnList: [{mcc: "999", mnc: "70"}]` to SMF configs. |
+| **SMF crash: `invalid links: non zero value required`** | SMF v4.2.2 validates that the `links` section has at least one entry. Removing the AN-to-UPF link to bypass PFCP issues caused validation failure. | Restored `links: [{A: gNB1, B: UPF}]` (the AN/UPF topology is required). |
+| **SMF log: `Can not get interface`** | SMF PFCP module searches for a local network interface matching `pfcp.externalAddr`. Using bare IPs (`10.100.0.31`) caused interface lookup to fail inside Docker. | Switched `pfcp.externalAddr` and `nodeID` to Docker hostnames (`5g-sim-smf-embb`) which resolve correctly. |
+| **SMF never sends PFCP Session Establishment** — always sends Session Modification to AN UPF with SEID=0 | SMF tries to establish PFCP with the AN (gNB) first. UERANSIM gNB has no PFCP listener, so the establishment fails silently and the SMF never proceeds to establish sessions with the actual UPF. | Partial: Added `nodeID`/`addr` to gNB1 in SMF userplane config pointing to the actual UPF's PFCP address. This lets PFCP Association succeed, but per-UE session establishment still requires further investigation. |
+| **UPF data plane broken: 0 RX on `upfgtp` interface** | Consequence of no PFCP sessions — the UPF has no PDR/FAR rules for any UE traffic, so GTP-U packets from the gNB are dropped. | Workaround: NS-3 simulation runs standalone with its own internal EPC (`NrPointToPointEpcHelper`), bypassing the external UPF. |
+| **CHF nil pointer in SMF** — `SelectedCHFProfile stays nil` | CHF v3.4.1 registeres in NRF without a `locality` field. SMF's NRF discovery with `preferred-locality=area1` returns zero matches, causing nil pointer when SMF tries to send charging requests. | Patched CHF NfProfile in MongoDB: `db.NfProfile.updateOne({nfType:"CHF"},{$set:{locality:"area1"}})`. Must be re-applied after every CHF restart. |
+
+### 3. UERANSIM — UE Registration
+
+| Problem | Root Cause | Resolution |
+|---------|-----------|------------|
+| **UE registration rejected with `CONGESTION`** | AUSF returned HTTP 500 to AMF because UDM could not authenticate the UE. Root chain: AMF → AUSF → UDM → UDR → MongoDB. UDR's missing `dbConnectorType` caused UDR to crash, making UDM unreachable. | Fixed UDR config (see above). The 500 error cascaded through the entire auth chain. |
+| **UE registration rejected: `invalid IMEI checksum`** | AMF decodes the UE's IMEI and validates it using the Luhn algorithm. The UERANSIM UE config used IMEIs with incorrect check digits. | Recalculated check digits for every IMEI using the standard GSM Luhn algorithm. Example: `356938035643803` → `356938035643809`. |
+| **gNB-UE RLS incompatibility** — UE reports `no cell is in coverage` | Switching gNB from `towards5gs/ueransim-gnb` to `free5gc/ueransim:latest` broke RLS (Radio Link Simulation) compatibility with the `towards5gs/ueransim-ue` UE containers. | Reverted gNB to `towards5gs/ueransim-gnb`. Both images are v3.2.8 but may have different RLS implementations. |
+
+### 4. NS-3 / 5G-LENA Simulation
+
+| Problem | Root Cause | Resolution |
+|---------|-----------|------------|
+| **Build failure: `/usr/bin/ccache: not found`** | NS-3 build system uses `ccache` for caching object files. The build container's minimal `ubuntu:22.04` image lacks this package. | Added `ccache` to apt install list. |
+| **Build failure: CMake regeneration fails with ninja** | Incremental builds (`python3 ns3 build scratch/...`) trigger CMake rerun, which fails if boost headers are missing. | Installed `libboost-all-dev` in the build container. |
+| **Runtime crash: `m_channelBandwidth == 0`** | 5G-LENA's PHY layer checks that channel bandwidth is set before computing spectrum models. The BWP bandwidth configuration was correct, but the per-device PHY objects were not synchronized with the BWP config. | Added `DynamicCast<NrGnbNetDevice>(*it)->UpdateConfig()` and `DynamicCast<NrUeNetDevice>(*it)->UpdateConfig()` calls after device installation. |
+| **Runtime crash: `Failed to bind socket`** | `PacketSinkHelper` tried to bind a UDP socket at 0.1s simulation time, but the UE's network interface (assigned by `AssignUeIpv4Address`) was not ready. | Switched to `UdpServerHelper` (which handles timing better) and delayed app start to 1.5s. |
+| **Incorrect bandwidth calculation** | Original code computed total bandwidth from PRB counts (`(prbEmbb + prbMmtc) * 12 * 15kHz`). 5G-LENA's `SimpleOperationBandConf` expects the channel bandwidth in Hz directly and computes PRBs internally. | Use fixed bandwidth values (`20e6` or `40e6`) and let the model compute PRBs. Made bandwidth a command-line parameter. |
+| **mMTC flow classification: showed 0 Mbps** | Flow classifier checked `t.sourcePort == iotPort`, but UDP clients use ephemeral ports (49153+). | Changed to `t.destinationPort == iotPort` for UL flows. |
+
+### 5. Docker-in-Docker Infrastructure
+
+| Problem | Root Cause | Resolution |
+|---------|-----------|------------|
+| **Inner volume vs. outer volume confusion** | The outer container mounts host volumes (`-v 5g-sim-ns3:/ns3-build`). Inner Docker containers also mount `5g-sim-ns3` — but this is the *inner* volume stored at `/var/lib/docker/volumes/5g-sim-ns3/_data/` inside the outer container, NOT the outer host volume. | Access inner build artifacts via `docker exec 5g-sim-host ls /var/lib/docker/volumes/5g-sim-ns3/_data/`. Use the `5g-sim-results` volume for persistent output. |
+| **NS-3 build lost on every container restart** | Ephemeral build containers (`docker run --rm`) write build artifacts to the volume correctly, but the build environment (apt packages) is lost. | Create a reusable build script that installs all deps and rebuilds. Cache package downloads via Docker layer caching. |
+| **Slow build cycle (~10 min per rebuild)** | Each build requires apt-get install of 15+ packages (~200 MB). | Use a custom Docker image with pre-installed deps for production use. For development, accept the overhead. |
+| **gtp5g kernel module scope** | gtp5g is a kernel module loaded on the **host**. The outer (DinD) container inherits it. All inner containers share the same kernel module version. Cannot run two different gtp5g versions simultaneously. | Ensured all inner free5gc images (v4.2.2) are compatible with the host's gtp5g v0.10.2. |
+
+### 6. Network Configuration
+
+| Problem | Root Cause | Resolution |
+|---------|-----------|------------|
+| **iperf3 server unreachable from UE via 5G path** | UEs have two interfaces: `eth0` (Docker bridge) and `uesimtun0` (5G tunnel). The default route points to `eth0`, so traffic to the iperf server (on the same Docker bridge) bypasses the 5G data path entirely. | Added static routes: `ip route add 10.100.0.91/32 dev uesimtun0 metric 100`. However, data still doesn't flow because the underlying UPF data plane is broken (see PFCP issue above). |
+| **iperf-video and UE IoT 10 IP conflict** | Both assigned `10.100.0.90` in the original guide. | Shifted iperf servers: iperf-video at `.91`, iperf-iot at `.92`. |
+| **UPF iptables NAT missing** | The UPF config has `natifname: eth0`, but v4.2.2 UPF does not automatically add iptables MASQUERADE rules for UE subnet. | Added `iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE && iptables -I FORWARD 1 -j ACCEPT` to UPF startup command. |
+
+### 7. Summary of Root Causes
+
+The debugging effort revealed a clear pattern: most issues stemmed from **version mismatches** between the original project guide (written for free5gc v3.4.1) and the actual system (which had free5gc v4.2.2 + gtp5g v0.10.2 pre-installed). Key changes between v3.4.1 and v4.2.2:
+
+| Change | Impact |
+|--------|--------|
+| gtp5g compatibility | v3.4.1 → gtp5g 0.8.x; v4.2.2 → gtp5g 0.10.x |
+| Config schema additions | `dbConnectorType`, `plmnList`, `links` validation |
+| MongoDB schema changes | `sequenceNumber` format, credential field names |
+| PFCP behaviour | v4.2.2 SMF more strict about AN PFCP establishment |
+| UPF NAT | v4.2.2 requires manual iptables configuration |
